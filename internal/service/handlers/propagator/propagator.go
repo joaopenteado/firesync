@@ -2,13 +2,14 @@ package propagator
 
 import (
 	"context"
-	"encoding/base64"
 	"io"
 	"net/http"
 
 	"cloud.google.com/go/pubsub"
+	"github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/proto"
 )
 
 // propagator propagates changes from the local database to the Pub/Sub topic
@@ -32,6 +33,13 @@ func (svc *propagator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
+	data := firestoredata.DocumentEventData{}
+	if err := proto.Unmarshal(bodyBytes, &data); err != nil {
+		log.Error().Err(err).Msg("failed to unmarshal request body")
+		http.Error(w, "failed to unmarshal request body", http.StatusInternalServerError)
+		return
+	}
+
 	log.Debug().
 		Str("method", r.Method).
 		Str("path", r.URL.Path).
@@ -40,9 +48,11 @@ func (svc *propagator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Str("ce_source", r.Header.Get("ce-source")).
 			Str("ce_specversion", r.Header.Get("ce-specversion")).
 			Str("ce_type", r.Header.Get("ce-type")).
-			Str("ce_time", r.Header.Get("ce-time")),
+			Str("ce_time", r.Header.Get("ce-time")).
+			Str("traceparent", r.Header.Get("traceparent")).
+			Str("tracestate", r.Header.Get("tracestate")),
 		).
-		Str("body", base64.StdEncoding.EncodeToString(bodyBytes)).
+		Str("data", data.String()).
 		Msg("propagator")
 
 	w.WriteHeader(http.StatusNoContent)

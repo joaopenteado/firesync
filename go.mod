@@ -8,6 +8,7 @@ require (
 	cloud.google.com/go/pubsub v1.49.0
 	github.com/go-chi/chi v1.5.5
 	github.com/go-chi/chi/v5 v5.1.0
+	github.com/googleapis/google-cloudevents-go v0.9.0
 	github.com/joaopenteado/runcfg v0.4.0
 	github.com/joaopenteado/runcfg/otelcfg v0.3.0
 	github.com/joaopenteado/runcfg/zerologcfg v0.1.1
@@ -16,6 +17,7 @@ require (
 	github.com/sethvargo/go-envconfig v1.3.0
 	go.opentelemetry.io/otel v1.35.0
 	go.opentelemetry.io/otel/sdk v1.35.0
+	google.golang.org/protobuf v1.36.6
 )
 
 require (
@@ -86,5 +88,4 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20250505200425-f936aa4a68b2 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250505200425-f936aa4a68b2 // indirect
 	google.golang.org/grpc v1.72.0 // indirect
-	google.golang.org/protobuf v1.36.6 // indirect
 )
