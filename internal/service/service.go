@@ -102,6 +102,7 @@ func newService(ctx context.Context) (svc *service, err error) {
 	}
 
 	// Setup global logger for Cloud Logging
+	zerolog.SetGlobalLevel(svc.LogLevel)
 	log.Logger = log.Hook(zerologcfg.Hook(svc.ProjectID))
 
 	// Setup Cloud Profier
@@ -119,7 +120,7 @@ func newService(ctx context.Context) (svc *service, err error) {
 	// Setup OpenTelemetry
 	svc.hasOtel = true
 	if err := svc.setupOpenTelemetry(ctx); err != nil {
-		log.Err(err).Msg("failed to setup OpenTelemetry")
+		log.Warn().Err(err).Msg("failed to setup OpenTelemetry")
 		svc.hasOtel = false
 	}
 
@@ -144,17 +145,20 @@ func newService(ctx context.Context) (svc *service, err error) {
 		middleware.Recoverer,
 		middleware.Timeout(svc.Timeout),
 		middleware.Heartbeat("/healthz"), // Liveness probe
-		hlog.NewHandler(log.Logger),
 	)
 
 	if svc.hasOtel {
 		r.Use(otelchi.Middleware(svc.Name, otelchi.WithChiRoutes(r)))
 	}
 
+	r.Use(hlog.NewHandler(log.Logger))
+
 	// Register handlers
 	r.Route("/v1", func(r chi.Router) {
 		r.Method(http.MethodPost, "/replicate", replicator.New(ctx, firestoreClient))
-		r.Method(http.MethodPost, "/propagate", propagator.New(ctx, pubsubClient.Topic(svc.Topic)))
+
+		r.With(traceCloudEventHeaders).
+			Method(http.MethodPost, "/propagate", propagator.New(ctx, pubsubClient.Topic(svc.Topic)))
 	})
 
 	// Setup HTTP server
@@ -211,7 +215,7 @@ func (s *service) Stop(ctx context.Context) (retErr error) {
 			continue
 		}
 
-		log.Info().
+		log.Debug().
 			Str("function", fnName).
 			Msg("shutdown function executed successfully")
 	}

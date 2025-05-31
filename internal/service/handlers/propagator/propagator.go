@@ -4,11 +4,14 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strings"
 
 	"cloud.google.com/go/pubsub"
 	"github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.32.0"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -24,36 +27,80 @@ func New(ctx context.Context, topic *pubsub.Topic) http.Handler {
 }
 
 func (svc *propagator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// https://cloud.google.com/eventarc/docs/cloudevents#firestore
+	ctx := r.Context()
+	logger := zerolog.Ctx(ctx)
+
+	trace.SpanFromContext(ctx).SetAttributes(
+		semconv.CloudEventsEventID(r.Header.Get("ce-id")),
+		semconv.CloudEventsEventSource(r.Header.Get("ce-source")),
+		semconv.CloudEventsEventSpecVersion(r.Header.Get("ce-specversion")),
+		semconv.CloudEventsEventType(r.Header.Get("ce-type")),
+
+		// Not standard OTEL attribute convention, but useful nonetheless
+		attribute.String("cloudevents.event_time", r.Header.Get("ce-time")),
+	)
+
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to read request body")
-		http.Error(w, "failed to read request body", http.StatusInternalServerError)
+		logger.Error().Err(err).Msg("failed to read request body")
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
 
-	data := firestoredata.DocumentEventData{}
-	if err := proto.Unmarshal(bodyBytes, &data); err != nil {
-		log.Error().Err(err).Msg("failed to unmarshal request body")
-		http.Error(w, "failed to unmarshal request body", http.StatusInternalServerError)
+	headers := zerolog.Dict()
+	for k, v := range r.Header {
+		headers.Str(k, strings.Join(v, ","))
+	}
+
+	logger.Debug().
+		Dict("headers", headers).
+		Msg("propagator")
+
+	// https://cloud.google.com/eventarc/docs/cloudevents#firestore
+	event := firestoredata.DocumentEventData{}
+	if err := proto.Unmarshal(bodyBytes, &event); err != nil {
+		logger.Error().Err(err).Msg("failed to unmarshal request body")
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	log.Debug().
-		Str("method", r.Method).
-		Str("path", r.URL.Path).
-		Dict("headers", zerolog.Dict().
-			Str("ce_id", r.Header.Get("ce-id")).
-			Str("ce_source", r.Header.Get("ce-source")).
-			Str("ce_specversion", r.Header.Get("ce-specversion")).
-			Str("ce_type", r.Header.Get("ce-type")).
-			Str("ce_time", r.Header.Get("ce-time")).
-			Str("traceparent", r.Header.Get("traceparent")).
-			Str("tracestate", r.Header.Get("tracestate")),
-		).
-		Str("data", data.String()).
-		Msg("propagator")
+	eventType := getEventType(&event)
+
+	if eventType == eventTypeDelete {
+		name := event.GetOldValue().GetName()
+		trace.SpanFromContext(ctx).SetAttributes(
+			attribute.String("gcp.firestore.document.name", name),
+		)
+
+		// propagate set ttl event
+		logger.Debug().
+			Msg("delete event")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if _, ok := event.GetValue().GetFields()["_firesync"]; ok {
+		// skip replicated changes
+		logger.Debug().Msg("skipping replicated change")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	switch getEventType(&event) {
+	case eventTypeCreate:
+		logger.Info().Msg("create event")
+	case eventTypeUpdate:
+		logger.Info().Msg("update event")
+	case eventTypeDelete:
+		logger.Info().Msg("delete event")
+		// todo set tll
+	}
+
+	// Propagate changes to the Pub/Sub topic if not a replicated change
+	// (i.e. the change originated in this region)
+
+	// TODO for deleted documents, set the ttl for now
 
 	w.WriteHeader(http.StatusNoContent)
 	w.Write([]byte("propagator"))
