@@ -11,7 +11,7 @@ require (
 	github.com/googleapis/google-cloudevents-go v0.9.0
 	github.com/joaopenteado/runcfg v0.4.0
 	github.com/joaopenteado/runcfg/otelcfg v0.3.0
-	github.com/joaopenteado/runcfg/zerologcfg v0.1.1
+	github.com/joaopenteado/runcfg/zerologcfg v0.2.0
 	github.com/riandyrn/otelchi v0.12.1
 	github.com/rs/zerolog v1.34.0
 	github.com/sethvargo/go-envconfig v1.3.0

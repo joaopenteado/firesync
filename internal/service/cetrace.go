@@ -34,7 +34,7 @@ func traceCloudEventHeaders(next http.Handler) http.Handler {
 			attrs = append(attrs, semconv.CloudEventsEventType(eventType))
 		}
 
-		// Not standard OTEL attribute convention, but useful nonetheless
+		// Non-standard OTEL attribute convention, but useful nonetheless
 
 		if eventTime := r.Header.Get("ce-time"); eventTime != "" {
 			attrs = append(attrs, attribute.String("cloudevents.event_time", eventTime))

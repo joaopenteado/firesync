@@ -154,7 +154,7 @@ func newService(ctx context.Context) (svc *service, err error) {
 		r.Use(otelchi.Middleware(svc.Name, otelchi.WithChiRoutes(r)))
 	}
 
-	r.Use(logCtx(log.Logger))
+	r.Use(zerologcfg.Handler(log.Logger))
 
 	// Register handlers
 	r.Route("/v1", func(r chi.Router) {
@@ -164,10 +164,10 @@ func newService(ctx context.Context) (svc *service, err error) {
 		if svc.hasOtel {
 			r.With(traceCloudEventHeaders).
 				Method(http.MethodPost, "/propagate",
-					propagator.New(ctx, pubsubClient.Topic(svc.Topic)))
+					propagator.New(ctx, pubsubClient.Topic(svc.Topic), svc.Region))
 		} else {
 			r.Method(http.MethodPost, "/propagate",
-				propagator.New(ctx, pubsubClient.Topic(svc.Topic)))
+				propagator.New(ctx, pubsubClient.Topic(svc.Topic), svc.Region))
 		}
 	})
 
