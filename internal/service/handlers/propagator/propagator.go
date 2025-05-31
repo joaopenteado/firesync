@@ -30,16 +30,6 @@ func (svc *propagator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	logger := zerolog.Ctx(ctx)
 
-	trace.SpanFromContext(ctx).SetAttributes(
-		semconv.CloudEventsEventID(r.Header.Get("ce-id")),
-		semconv.CloudEventsEventSource(r.Header.Get("ce-source")),
-		semconv.CloudEventsEventSpecVersion(r.Header.Get("ce-specversion")),
-		semconv.CloudEventsEventType(r.Header.Get("ce-type")),
-
-		// Not standard OTEL attribute convention, but useful nonetheless
-		attribute.String("cloudevents.event_time", r.Header.Get("ce-time")),
-	)
-
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to read request body")
