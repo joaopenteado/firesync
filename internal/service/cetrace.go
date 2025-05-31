@@ -68,14 +68,6 @@ func traceCloudEventHeaders(next http.Handler) http.Handler {
 			attrs = append(attrs, attribute.String("cloudevents.event_project", project))
 		}
 
-		if traceparent := r.Header.Get("ce-traceparent"); traceparent != "" {
-			attrs = append(attrs, attribute.String("cloudevents.event_traceparent", traceparent))
-		}
-
-		if tracestate := r.Header.Get("ce-tracestate"); tracestate != "" {
-			attrs = append(attrs, attribute.String("cloudevents.event_tracestate", tracestate))
-		}
-
 		if len(attrs) > 0 {
 			span.SetAttributes(attrs...)
 		}

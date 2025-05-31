@@ -4,13 +4,10 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"strings"
 
 	"cloud.google.com/go/pubsub"
 	"github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -37,15 +34,6 @@ func (svc *propagator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	headers := zerolog.Dict()
-	for k, v := range r.Header {
-		headers.Str(k, strings.Join(v, ","))
-	}
-
-	logger.Debug().
-		Dict("headers", headers).
-		Msg("propagator")
-
 	// https://cloud.google.com/eventarc/docs/cloudevents#firestore
 	event := firestoredata.DocumentEventData{}
 	if err := proto.Unmarshal(bodyBytes, &event); err != nil {
@@ -57,11 +45,6 @@ func (svc *propagator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	eventType := getEventType(&event)
 
 	if eventType == eventTypeDelete {
-		name := event.GetOldValue().GetName()
-		trace.SpanFromContext(ctx).SetAttributes(
-			attribute.String("gcp.firestore.document.name", name),
-		)
-
 		// propagate set ttl event
 		logger.Debug().
 			Msg("delete event")
@@ -86,11 +69,5 @@ func (svc *propagator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// todo set tll
 	}
 
-	// Propagate changes to the Pub/Sub topic if not a replicated change
-	// (i.e. the change originated in this region)
-
-	// TODO for deleted documents, set the ttl for now
-
-	w.WriteHeader(http.StatusNoContent)
-	w.Write([]byte("propagator"))
+	w.WriteHeader(http.StatusCreated)
 }

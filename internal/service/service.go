@@ -22,12 +22,12 @@ import (
 	"github.com/joaopenteado/runcfg/zerologcfg"
 	"github.com/riandyrn/otelchi"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/hlog"
 	"github.com/rs/zerolog/log"
 	"github.com/sethvargo/go-envconfig"
 	otelattr "go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 )
 
 type Service interface {
@@ -47,6 +47,7 @@ type config struct {
 	runcfg.Service  `env:"RUNCFG_SERVICE, decodeunset"`
 	Timeout         time.Duration `env:"TIMEOUT, default=10s"`
 	LogLevel        zerolog.Level `env:"LOG_LEVEL, default=info"`
+	EnableProfiler  bool          `env:"ENABLE_PROFILER, default=true"`
 
 	// DatabaseID is the ID of the Cloud Firestore database to replicate changes
 	// to. If not provided, the default database will be used.
@@ -106,15 +107,17 @@ func newService(ctx context.Context) (svc *service, err error) {
 	log.Logger = log.Hook(zerologcfg.Hook(svc.ProjectID))
 
 	// Setup Cloud Profier
-	profCfg := profiler.Config{
-		Service:        svc.Name,
-		ServiceVersion: svc.Revision,
-		ProjectID:      svc.ProjectID,
-		Instance:       svc.InstanceID,
-		Zone:           svc.Region,
-	}
-	if err := profiler.Start(profCfg); err != nil {
-		log.Err(err).Msg("failed to start profiler")
+	if svc.EnableProfiler {
+		profCfg := profiler.Config{
+			Service:        svc.Name,
+			ServiceVersion: svc.Revision,
+			ProjectID:      svc.ProjectID,
+			Instance:       svc.InstanceID,
+			Zone:           svc.Region,
+		}
+		if err := profiler.Start(profCfg); err != nil {
+			log.Err(err).Msg("failed to start profiler")
+		}
 	}
 
 	// Setup OpenTelemetry
@@ -151,14 +154,21 @@ func newService(ctx context.Context) (svc *service, err error) {
 		r.Use(otelchi.Middleware(svc.Name, otelchi.WithChiRoutes(r)))
 	}
 
-	r.Use(hlog.NewHandler(log.Logger))
+	r.Use(logCtx(log.Logger))
 
 	// Register handlers
 	r.Route("/v1", func(r chi.Router) {
-		r.Method(http.MethodPost, "/replicate", replicator.New(ctx, firestoreClient))
+		r.Method(http.MethodPost, "/replicate",
+			replicator.New(ctx, firestoreClient))
 
-		r.With(traceCloudEventHeaders).
-			Method(http.MethodPost, "/propagate", propagator.New(ctx, pubsubClient.Topic(svc.Topic)))
+		if svc.hasOtel {
+			r.With(traceCloudEventHeaders).
+				Method(http.MethodPost, "/propagate",
+					propagator.New(ctx, pubsubClient.Topic(svc.Topic)))
+		} else {
+			r.Method(http.MethodPost, "/propagate",
+				propagator.New(ctx, pubsubClient.Topic(svc.Topic)))
+		}
 	})
 
 	// Setup HTTP server
@@ -179,7 +189,7 @@ func (s *service) setupOpenTelemetry(ctx context.Context) error {
 	attrs = append(attrs, otelattr.String("gcp.project_id", s.ProjectID))
 
 	// For a nicer UI in Cloud Trace, add the service name
-	attrs = append(attrs, otelattr.String("service.name", s.Name))
+	attrs = append(attrs, semconv.ServiceName(s.Name))
 
 	// OpenTelemetry configuration
 	res := otelcfg.NewServiceResource(&s.Metadata, &s.Service, otelcfg.WithAttributes(attrs...))
