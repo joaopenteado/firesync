@@ -5,11 +5,15 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/pubsub"
 	"github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
 	"github.com/joaopenteado/firesync/internal/eventinfo"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -17,12 +21,24 @@ import (
 // for other replicators to consume. It skipps propagating changes resulted
 // from changes replicated from other sources.
 type propagator struct {
-	topic         *pubsub.Topic
-	defaultRegion string
+	topic          *pubsub.Topic
+	defaultRegion  string
+	propagationLag metric.Int64Histogram
 }
 
 func New(ctx context.Context, topic *pubsub.Topic, defaultRegion string) http.Handler {
-	return &propagator{topic: topic, defaultRegion: defaultRegion}
+	meter := otel.Meter("firesync.propagator")
+	propagationLag, err := meter.Int64Histogram(
+		"firesync.propagator.propagation_lag",
+		metric.WithDescription("The time it takes for a change to be propagated to Pub/Sub."),
+		metric.WithUnit("ms"),
+	)
+	if err != nil {
+		// Handle error appropriately in a real application, perhaps by panicking or returning an error.
+		// For this example, we'll log and continue, which might lead to nil pointer dereferences later.
+		zerolog.Ctx(ctx).Err(err).Msg("failed to create propagationLag histogram")
+	}
+	return &propagator{topic: topic, defaultRegion: defaultRegion, propagationLag: propagationLag}
 }
 
 func (svc *propagator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +104,28 @@ func (svc *propagator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	propagatedAt := time.Now()
+	changeTime := event.GetValue().GetUpdateTime().AsTime()
+	if changeTime.IsZero() {
+		ceTime, err := time.Parse(time.RFC3339, r.Header.Get("ce-time"))
+		if err != nil {
+			logger.Warn().Err(err).Msg("failed to parse ce-time header")
+		} else {
+			changeTime = ceTime
+		}
+	}
+
+	if !changeTime.IsZero() {
+		latency := propagatedAt.Sub(changeTime).Milliseconds()
+
+		attrs := make([]attribute.KeyValue, 0, 1)
+		if sourceDatabase := getSourceDatabase(&event); sourceDatabase != "" {
+			attrs = append(attrs, attribute.String("source_database", sourceDatabase))
+		}
+
+		svc.propagationLag.Record(ctx, latency, metric.WithAttributes(attrs...))
+	}
+
 	logger.Info().Str("message_id", msgID).Msg("change propagated")
 
 	w.WriteHeader(http.StatusCreated)
@@ -121,4 +159,19 @@ func shouldSkip(event *firestoredata.DocumentEventData) (eventinfo.EventType, bo
 	}
 
 	panic("unreachable event type") // will be recovered in middleware
+}
+
+func getSourceDatabase(event *firestoredata.DocumentEventData) string {
+	// projects/{project_id}/databases/{database_id}/documents/{document_path}
+	name := event.GetValue().GetName()
+	if name == "" {
+		name = event.GetOldValue().GetName()
+	}
+
+	idx := strings.Index(name, "/documents")
+	if idx == -1 {
+		return ""
+	}
+
+	return name[:idx]
 }

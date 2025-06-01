@@ -1,6 +1,8 @@
 package eventinfo
 
-import "github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
+import (
+	"github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
+)
 
 type EventType int
 
