@@ -112,6 +112,7 @@ func shouldSkip(event *firestoredata.DocumentEventData) (eventinfo.EventType, bo
 	case eventinfo.EventTypeDeleted:
 		if firesync, ok := event.GetValue().GetFields()["_firesync"]; ok {
 			if deleted, ok := firesync.GetMapValue().GetFields()["deleted"]; ok && deleted.GetBooleanValue() {
+				// Doesn't work!
 				// Document was deleted by a replicator
 				return eventinfo.EventTypeDeleted, true
 			}

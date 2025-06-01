@@ -25,9 +25,12 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/sethvargo/go-envconfig"
 	otelattr "go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+
+	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
 )
 
 type Service interface {
@@ -181,7 +184,7 @@ func newService(ctx context.Context) (svc *service, err error) {
 	return svc, nil
 }
 
-func (s *service) setupOpenTelemetry(ctx context.Context) error {
+func (s *service) setupOpenTelemetry(ctx context.Context) (retErr error) {
 	attrs := resource.Default().Attributes()
 
 	// Required to assign a project to the traces in Cloud Trace
@@ -198,11 +201,31 @@ func (s *service) setupOpenTelemetry(ctx context.Context) error {
 		otelcfg.WithTracerProviderOptions(trace.WithResource(res)),
 	)
 	if err != nil {
-		return err
+		retErr = err
+	} else {
+		s.shutdownFuncs = append(s.shutdownFuncs, tp.Shutdown)
 	}
 
-	s.shutdownFuncs = append(s.shutdownFuncs, tp.Shutdown)
-	return nil
+	mr, err := otelcfg.CloudMonitoringMetricReader(ctx,
+		otelcfg.WithExporterOptions(mexporter.WithProjectID(s.ProjectID)),
+	)
+	if err != nil {
+		return errors.Join(retErr, err)
+	} else {
+		s.shutdownFuncs = append(s.shutdownFuncs, mr.Shutdown)
+	}
+
+	mp, err := otelcfg.SetupMeterProvider(ctx,
+		otelcfg.WithReader(mr),
+		otelcfg.WithMetricOptions(metric.WithResource(res)),
+	)
+	if err != nil {
+		return errors.Join(retErr, err)
+	} else {
+		s.shutdownFuncs = append(s.shutdownFuncs, mp.Shutdown)
+	}
+
+	return retErr
 }
 
 func (s *service) Start(ctx context.Context) error {
