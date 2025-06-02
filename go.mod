@@ -8,7 +8,7 @@ require (
 	cloud.google.com/go/pubsub v1.49.0
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.52.0
 	github.com/go-chi/chi v1.5.5
-	github.com/go-chi/chi/v5 v5.1.0
+	github.com/go-chi/chi/v5 v5.2.1
 	github.com/googleapis/google-cloudevents-go v0.9.0
 	github.com/joaopenteado/runcfg v0.4.0
 	github.com/joaopenteado/runcfg/otelcfg v0.4.0
