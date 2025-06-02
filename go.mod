@@ -10,7 +10,7 @@ require (
 	github.com/go-chi/chi v1.5.5
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/googleapis/google-cloudevents-go v0.9.0
-	github.com/joaopenteado/runcfg v0.4.0
+	github.com/joaopenteado/runcfg v0.4.1
 	github.com/joaopenteado/runcfg/otelcfg v0.4.0
 	github.com/joaopenteado/runcfg/zerologcfg v0.2.0
 	github.com/riandyrn/otelchi v0.12.1
