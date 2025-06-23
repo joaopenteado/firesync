@@ -6,13 +6,13 @@ require (
 	cloud.google.com/go/firestore v1.18.0
 	cloud.google.com/go/profiler v0.4.2
 	cloud.google.com/go/pubsub v1.49.0
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.52.0
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.53.0
 	github.com/go-chi/chi v1.5.5
-	github.com/go-chi/chi/v5 v5.1.0
+	github.com/go-chi/chi/v5 v5.2.2
 	github.com/googleapis/google-cloudevents-go v0.9.0
-	github.com/joaopenteado/runcfg v0.4.0
+	github.com/joaopenteado/runcfg v0.5.0
 	github.com/joaopenteado/runcfg/otelcfg v0.4.0
-	github.com/joaopenteado/runcfg/zerologcfg v0.2.0
+	github.com/joaopenteado/runcfg/zerologcfg v0.3.0
 	github.com/riandyrn/otelchi v0.12.1
 	github.com/rs/zerolog v1.34.0
 	github.com/sethvargo/go-envconfig v1.3.0
@@ -32,7 +32,7 @@ require (
 	cloud.google.com/go/iam v1.5.2 // indirect
 	cloud.google.com/go/longrunning v0.6.7 // indirect
 	cloud.google.com/go/monitoring v1.24.2 // indirect
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.52.0 // indirect
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
