@@ -8,14 +8,30 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"cloud.google.com/go/firestore"
+	"cloud.google.com/go/profiler"
+	"cloud.google.com/go/pubsub"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
+	"github.com/joaopenteado/firesync/internal/cloudlogging"
+	"github.com/joaopenteado/firesync/internal/config"
+	"github.com/joaopenteado/firesync/internal/handler"
+	"github.com/joaopenteado/firesync/internal/router"
 	"github.com/joaopenteado/firesync/internal/service"
+	"github.com/joaopenteado/firesync/internal/telemetry"
+)
+
+const (
+	InitializationTimeout = 5 * time.Second
 )
 
 func main() {
@@ -23,37 +39,116 @@ func main() {
 	defer cancel()
 
 	if err := run(ctx); err != nil {
-		// Ensure the root context is called, since os.Exit() does not call
-		// deferred functions.
-		cancel()
-
+		cancel() // Cancel root context when os.Exit() is called.
 		log.Fatal().Err(err).Msg("failed to run service")
 	}
 }
 
 func run(ctx context.Context) error {
-	// GracefulShutdownTimeout represents how long the service has to gracefully
-	// terminate after receiving a SIGTERM or SIGINT signal.
-	// Cloud Run will forcefully terminate the application after 10 seconds.
-	// https://cloud.google.com/run/docs/reference/container-contract#instance-shutdown
-	gracefulShutdownTimeout := 8 * time.Second
-	if timeout := os.Getenv("GRACEFUL_SHUTDOWN_TIMEOUT"); timeout != "" {
-		parsedTimeout, err := time.ParseDuration(timeout)
-		if err != nil {
-			return fmt.Errorf("failed to parse GRACEFUL_SHUTDOWN_TIMEOUT: %w", err)
-		}
-		gracefulShutdownTimeout = parsedTimeout
+	var shutdownSignalDeadline time.Time
+
+	initCtx, initCancel := context.WithTimeout(ctx, InitializationTimeout)
+	defer initCancel()
+
+	// Configuration
+	cfg, err := config.Load(initCtx)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	svc, err := service.New(ctx)
+	// Logging
+	zerolog.SetGlobalLevel(cfg.LogLevel)
+	zerolog.TimeFieldFormat = time.RFC3339Nano
+	zerolog.LevelFieldName = "severity"
+	zerolog.LevelFieldMarshalFunc = cloudlogging.LevelFieldMarshalFunc
+	if cfg.Environment == "local" {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	} else {
+		log.Logger = log.Hook(cloudlogging.Hook(cfg.ProjectID))
+	}
+
+	// Profiling
+	if cfg.ProfilingEnabled {
+		profCfg := profiler.Config{
+			Service:        cfg.ServiceName,
+			ServiceVersion: cfg.ServiceRevision,
+			ProjectID:      cfg.ProjectID,
+			Instance:       cfg.InstanceID,
+			Zone:           cfg.Region,
+		}
+		if err := profiler.Start(profCfg); err != nil {
+			log.Err(err).Msg("failed to start profiler")
+		}
+	}
+
+	// Telemetry
+	telemetryManager := telemetry.NewManager(initCtx, telemetry.Options{
+		ProjectID:        cfg.ProjectID,
+		ServiceName:      cfg.ServiceName,
+		ServiceRevision:  cfg.ServiceRevision,
+		InstanceID:       cfg.InstanceID,
+		TracingEnabled:   cfg.TracingEnabled,
+		MetricsEnabled:   cfg.MetricsEnabled,
+		Environment:      cfg.Environment,
+		TraceSampleRatio: cfg.TraceSampleRatio,
+	})
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+	otel.SetTracerProvider(telemetryManager.TracerProvider())
+	otel.SetMeterProvider(telemetryManager.MeterProvider())
+	defer func() {
+		ctx, cancel := context.WithDeadline(ctx, shutdownSignalDeadline)
+		defer cancel()
+		if err := telemetryManager.Shutdown(ctx); err != nil {
+			log.Warn().Err(err).Msg("failed to shutdown telemetry manager")
+		}
+	}()
+	meter := telemetryManager.MeterProvider().Meter("github.com/joaopenteado/firesync")
+
+	pubsubClient, err := pubsub.NewClient(ctx, cfg.ProjectID)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create pubsub client: %w", err)
+	}
+	defer func() {
+		if err := pubsubClient.Close(); err != nil {
+			log.Err(err).Msg("failed to close pubsub client")
+		}
+	}()
+
+	firestoreClient, err := firestore.NewClientWithDatabase(ctx, cfg.DatabaseProjectID(), cfg.DatabaseID())
+	if err != nil {
+		return fmt.Errorf("failed to create firestore client: %w", err)
+	}
+	defer func() {
+		if err := firestoreClient.Close(); err != nil {
+			log.Err(err).Msg("failed to close firestore client")
+		}
+	}()
+
+	propagator := service.NewPropagator(pubsubClient.Topic(cfg.Topic), meter)
+	replicator := service.NewReplicator(meter, firestoreClient)
+
+	r := router.New(router.Config{
+		PropagateHandler: handler.Propagate(propagator),
+		ReplicateHandler: handler.Replicate(replicator),
+		ServiceName:      cfg.ServiceName,
+		TracingEnabled:   cfg.TracingEnabled,
+	})
+
+	srv := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.Port),
+		Handler: r,
 	}
 
 	errCh := make(chan error)
 	go func() {
 		defer close(errCh)
-		errCh <- svc.Start(ctx)
+		log.Debug().Msg("starting service")
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			errCh <- err
+		}
 	}()
 
 	sig, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
@@ -65,19 +160,35 @@ func run(ctx context.Context) error {
 			return err // Server failed to start
 		}
 	case <-sig.Done(): // Graceful shutdown signal received
+		shutdownSignalDeadline = time.Now().Add(cfg.ServerGracefulShutdownTimeout)
 	}
 
-	log.Info().Msg("starting graceful shutdown")
+	log.Debug().
+		Dur("timeout", cfg.ServerGracefulShutdownTimeout).
+		Msg("initiating graceful shutdown")
 
 	// Remove the signal handler immediately to ensure following signals
 	// forcefully terminate the application.
 	stop()
 
-	ctx, cancel := context.WithTimeout(ctx, gracefulShutdownTimeout)
+	shutdownCtx, cancel := context.WithDeadline(ctx, shutdownSignalDeadline)
 	defer cancel()
 
-	if err := svc.Stop(ctx); err != nil {
-		return err
+	errCh = make(chan error)
+	go func() {
+		defer close(errCh)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("failed to gracefully shutdown server: %w", err)
+		}
+	case <-ctx.Done():
+		return fmt.Errorf("failed to gracefully shutdown server: %w", ctx.Err())
 	}
 
 	return nil
