@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"os"
 	"strings"
 	"time"
 
@@ -77,11 +78,15 @@ func environmentDefaults(env string) envconfig.Lookuper {
 	switch env {
 	case "local":
 		return envconfig.MapLookuper(map[string]string{
-			"CLOUD_RUN_INSTANCE_ID":   "local",
-			"K_REVISION":              "local",
-			"K_CONFIGURATION":         "local",
-			"LOG_LEVEL":               "debug",
-			"OTEL_TRACES_SAMPLER_ARG": "1.0",
+			"GOOGLE_CLOUD_PROJECT":  "firesync",
+			"GOOGLE_CLOUD_REGION":   "us-central1",
+			"CLOUD_RUN_INSTANCE_ID": "local",
+			"K_REVISION":            "local",
+			"K_CONFIGURATION":       "local",
+			"LOG_LEVEL":             "debug",
+			"ENABLE_TRACING":        "false",
+			"ENABLE_METRICS":        "false",
+			"ENABLE_PROFILING":      "false",
 		})
 	case "development":
 		return envconfig.MapLookuper(map[string]string{
@@ -137,10 +142,11 @@ func Load(ctx context.Context) (*Config, error) {
 		Target: cfg,
 		Lookuper: envconfig.MultiLookuper(
 			envconfig.OsLookuper(),
-			environmentDefaults(cfg.Environment),
+			environmentDefaults(os.Getenv("ENVIRONMENT")),
 			metadataLookuper(ctx),
 		),
 	}
+
 	if err := envconfig.ProcessWith(ctx, opts); err != nil {
 		return nil, err
 	}
