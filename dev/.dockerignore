@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+README.*
+LICENSE
+
+# Development files
+.env*
+dev/
+scripts/
+Makefile
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test files
+*_test.go
+test/
+testing/
+
+# Build artifacts
+dist/
+build/
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Dependencies (will be downloaded in Docker)
+vendor/
+
+# Temporary files
+tmp/
+temp/

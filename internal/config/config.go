@@ -11,6 +11,12 @@ import (
 	"github.com/sethvargo/go-envconfig"
 )
 
+const (
+	EnvironmentLocal       = "local"
+	EnvironmentDevelopment = "development"
+	EnvironmentProduction  = "production"
+)
+
 type Config struct {
 	// Project ID of the project the Cloud Run service belongs to.
 	ProjectID string `env:"GOOGLE_CLOUD_PROJECT, required"`
@@ -26,7 +32,7 @@ type Config struct {
 	Port uint16 `env:"PORT, default=8080"`
 
 	// The name of the Cloud Run service being run.
-	ServiceName string `env:"K_SERVICE, default=firesync"`
+	ServiceName string `env:"K_SERVICE, required"`
 
 	// The name of the Cloud Run revision being run.
 	ServiceRevision string `env:"K_REVISION, required"`
@@ -41,19 +47,13 @@ type Config struct {
 	// terminate after receiving a SIGTERM or SIGINT signal.
 	// Cloud Run will forcefully terminate the application after 10 seconds.
 	// https://cloud.google.com/run/docs/reference/container-contract#instance-shutdown
-	ServerGracefulShutdownTimeout time.Duration `env:"GRACEFUL_SHUTDOWN_TIMEOUT, default=8s"`
+	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT, default=8s"`
 
 	// ServiceTimeout is the timeout for the service.
 	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT, default=10s"`
 
-	// TracingEnabled enables tracing of the service.
-	TracingEnabled bool `env:"ENABLE_TRACING, default=true"`
-
-	// MetricsEnabled enables metrics of the service.
-	MetricsEnabled bool `env:"ENABLE_METRICS, default=true"`
-
-	// ProfilingEnabled enables profiling of the service.
-	ProfilingEnabled bool `env:"ENABLE_PROFILING, default=false"`
+	// GoogleCloudProfilerEnabled enables profiling of the service.
+	GoogleCloudProfilerEnabled bool `env:"GOOGLE_CLOUD_PROFILER_ENABLED, default=false"`
 
 	// DatabaseID is the ID of the Cloud Firestore database to replicate changes
 	// to. If not provided, the default database will be used.
@@ -70,35 +70,56 @@ type Config struct {
 	// LogLevel controls the verbosity of the logs.
 	LogLevel zerolog.Level `env:"LOG_LEVEL, default=info"`
 
+	// LogPretty enables pretty printing for logs.
+	LogPretty bool `env:"LOG_PRETTY, default=false"`
+
+	// TracingExporter specifies the OpenTelemetry tracing exporter to use.
+	// Supported values: "none" (default), "console", "otlp"
+	// If Google Cloud Tracing's OTLP endpoint (telemetry.googleapis.com) is
+	// configured with the OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or
+	// OTEL_EXPORTER_OTLP_ENDPOINT environment variables, per grpc credentials
+	// will be used automatically.
+	TracingExporter string `env:"OTEL_TRACES_EXPORTER, default=none"`
+
+	// MetricsExporter specifies the OpenTelemetry metrics exporter to use.
+	// Supported values: "none" (default), "console", "otlp", "googlecloudmetrics"
+	MetricsExporter string `env:"OTEL_METRICS_EXPORTER, default=none"`
+
+	// OTLPProtocol specifies the protocol to use for OTLP export.
+	// Currently only supports "grpc" which is the default when OTLP is
+	// specified.
+	OTLPProtocol string `env:"OTEL_EXPORTER_OTLP_PROTOCOL, default=grpc"`
+
+	// ConsoleExporterPrettyPrint enables pretty printing for the console
+	// exporter.
+	ConsoleExporterPrettyPrint bool `env:"OTEL_EXPORTER_CONSOLE_PRETTY, default=true"`
+
 	// TraceSampleRatio is the ratio of traces to sample.
 	TraceSampleRatio float64 `env:"OTEL_TRACES_SAMPLER_ARG, default=0.1"`
 }
 
 func environmentDefaults(env string) envconfig.Lookuper {
 	switch env {
-	case "local":
+	case EnvironmentLocal:
 		return envconfig.MapLookuper(map[string]string{
-			"GOOGLE_CLOUD_PROJECT":  "firesync",
-			"GOOGLE_CLOUD_REGION":   "us-central1",
-			"CLOUD_RUN_INSTANCE_ID": "local",
-			"K_REVISION":            "local",
-			"K_CONFIGURATION":       "local",
-			"LOG_LEVEL":             "debug",
-			"ENABLE_TRACING":        "false",
-			"ENABLE_METRICS":        "false",
-			"ENABLE_PROFILING":      "false",
-		})
-	case "development":
-		return envconfig.MapLookuper(map[string]string{
-			"ENABLE_PROFILING":        "true",
+			"GOOGLE_CLOUD_PROJECT":    "firesync",
+			"GOOGLE_CLOUD_REGION":     "us-central1",
+			"CLOUD_RUN_INSTANCE_ID":   "local",
+			"K_SERVICE":               "firesync",
+			"K_REVISION":              "local",
+			"K_CONFIGURATION":         "local",
 			"LOG_LEVEL":               "debug",
+			"OTEL_TRACES_EXPORTER":    "otlp",
+			"OTEL_METRICS_EXPORTER":   "otlp",
 			"OTEL_TRACES_SAMPLER_ARG": "1.0",
 		})
-	case "staging":
+	case EnvironmentDevelopment:
 		return envconfig.MapLookuper(map[string]string{
-			"ENABLE_PROFILING":        "true",
-			"LOG_LEVEL":               "debug",
-			"OTEL_TRACES_SAMPLER_ARG": "0.5",
+			"GOOGLE_CLOUD_PROFILER_ENABLED": "true",
+			"LOG_LEVEL":                     "debug",
+			"OTEL_TRACES_EXPORTER":          "otlp",
+			"OTEL_METRICS_EXPORTER":         "googlecloudmetrics",
+			"OTEL_TRACES_SAMPLER_ARG":       "1.0",
 		})
 	default:
 		// production defaults are set in the struct tags

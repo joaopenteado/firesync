@@ -1,0 +1,122 @@
+name: firesync
+
+services:
+
+  pubsub:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8080
+    restart: no
+
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud beta emulators firestore start --host-port=0.0.0.0:8080
+    restart: no
+
+  # simulator:
+  #   build:
+  #     context: ..
+  #     dockerfile: dev/Dockerfile
+  #     args:
+  #       BUILD_PATH: ./cmd/simulator
+  #   environment:
+  #     PUBSUB_EMULATOR_HOST: pubsub:8080
+  #     FIRESTORE_EMULATOR_HOST: firestore:8080
+  #   depends_on:
+  #     - firestore
+  #     - pubsub
+  #   restart: no
+
+  firesync-a:
+    build:
+      context: ..
+      dockerfile: dev/Dockerfile
+      args:
+        BUILD_PATH: ./cmd/firesync
+    develop:
+      watch:
+        - action: rebuild
+          path: ../
+          include: '**/*.go'
+        # - action: restart
+        #   target: firesync-a
+        #   restart: no
+    environment:
+      PUBSUB_EMULATOR_HOST: pubsub:8080
+      FIRESTORE_EMULATOR_HOST: firestore:8080
+      DATABASE: projects/firesync/databases/firesync-a
+      TOPIC: projects/firesync/topics/firesync
+      ENVIRONMENT: local
+
+      # OpenTelemetry configuration for Uptrace
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://uptrace:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      OTEL_EXPORTER_OTLP_HEADERS: uptrace-dsn=http://firesync_secret@localhost:8080?grpc=4317
+      OTEL_EXPORTER_OTLP_COMPRESSION: gzip
+      OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION: BASE2_EXPONENTIAL_BUCKET_HISTOGRAM
+      OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: DELTA
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      # - simulator
+      - uptrace
+    restart: no
+
+  #
+  # Telemetry
+  #
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3.5
+    restart: on-failure
+    environment:
+      CLICKHOUSE_USER: uptrace
+      CLICKHOUSE_PASSWORD: uptrace
+      CLICKHOUSE_DB: uptrace
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'localhost:8123/ping']
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    volumes:
+      - chdata:/var/lib/clickhouse
+
+  postgres:
+    image: postgres:17-alpine
+    restart: on-failure
+    environment:
+      POSTGRES_USER: uptrace
+      POSTGRES_PASSWORD: uptrace
+      POSTGRES_DB: uptrace
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U uptrace -d uptrace']
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    volumes:
+      - 'pgdata:/var/lib/postgresql/data'
+
+  redis:
+    image: redis:6.2.2-alpine
+    restart: on-failure
+
+  uptrace:
+    image: 'uptrace/uptrace:2.0.0'
+    restart: on-failure
+    volumes:
+      - ./uptrace.yml:/etc/uptrace/config.yml:ro
+    ports:
+      - '127.0.0.1:8080:8080'
+    depends_on:
+      - clickhouse
+      - postgres
+    labels:
+      - "com.docker.compose.dev.watch=true"
+      - "com.docker.compose.dev.watch.files=./uptrace.yml"
+
+volumes:
+  chdata:
+  pgdata:

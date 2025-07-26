@@ -1,26 +1,27 @@
 package telemetry
 
 import (
+	"context"
+
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/sdk/metric"
 )
 
-func NewCloudMonitoringMetricReader(projectID string) (metric.Reader, error) {
-	exporter, err := mexporter.New(mexporter.WithProjectID(projectID))
-	if err != nil {
-		return nil, err
-	}
-	return metric.NewPeriodicReader(exporter), nil
+func NewCloudMonitoringMetricExporter(projectID string) (metric.Exporter, error) {
+	return mexporter.New(mexporter.WithProjectID(projectID))
 }
 
-// NewStdoutMetricReader returns a stdout metric reader for local development.
-func NewStdoutMetricReader() (metric.Reader, error) {
-	exporter, err := stdoutmetric.New(
-		stdoutmetric.WithPrettyPrint(),
-	)
-	if err != nil {
-		return nil, err
+func NewOTLPMetricExporter(ctx context.Context) (metric.Exporter, error) {
+	return otlpmetricgrpc.New(ctx)
+}
+
+// NewStdoutMetricExporter returns a stdout metric exporter for local
+// development.
+func NewStdoutMetricExporter(prettyPrint bool) (metric.Exporter, error) {
+	if prettyPrint {
+		return stdoutmetric.New(stdoutmetric.WithPrettyPrint())
 	}
-	return metric.NewPeriodicReader(exporter), nil
+	return stdoutmetric.New()
 }

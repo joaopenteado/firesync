@@ -61,14 +61,17 @@ func run(ctx context.Context) error {
 	zerolog.TimeFieldFormat = time.RFC3339Nano
 	zerolog.LevelFieldName = "severity"
 	zerolog.LevelFieldMarshalFunc = cloudlogging.LevelFieldMarshalFunc
-	if cfg.Environment == "local" {
+	log.Logger = log.Hook(cloudlogging.Hook(cfg.ProjectID))
+	if cfg.LogPretty {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	} else {
-		log.Logger = log.Hook(cloudlogging.Hook(cfg.ProjectID))
 	}
 
+	log.Info().
+		Str("environment", cfg.Environment).
+		Msg("environment")
+
 	// Profiling
-	if cfg.ProfilingEnabled {
+	if cfg.GoogleCloudProfilerEnabled {
 		profCfg := profiler.Config{
 			Service:        cfg.ServiceName,
 			ServiceVersion: cfg.ServiceRevision,
@@ -83,14 +86,16 @@ func run(ctx context.Context) error {
 
 	// Telemetry
 	telemetryManager := telemetry.NewManager(initCtx, telemetry.Options{
-		ProjectID:        cfg.ProjectID,
-		ServiceName:      cfg.ServiceName,
-		ServiceRevision:  cfg.ServiceRevision,
-		InstanceID:       cfg.InstanceID,
-		TracingEnabled:   cfg.TracingEnabled,
-		MetricsEnabled:   cfg.MetricsEnabled,
-		Environment:      cfg.Environment,
-		TraceSampleRatio: cfg.TraceSampleRatio,
+		ProjectID:                  cfg.ProjectID,
+		ServiceName:                cfg.ServiceName,
+		ServiceRevision:            cfg.ServiceRevision,
+		InstanceID:                 cfg.InstanceID,
+		Environment:                cfg.Environment,
+		TracingExporter:            cfg.TracingExporter,
+		MetricsExporter:            cfg.MetricsExporter,
+		OTLPProtocol:               cfg.OTLPProtocol,
+		ConsoleExporterPrettyPrint: cfg.ConsoleExporterPrettyPrint,
+		TraceSampleRatio:           cfg.TraceSampleRatio,
 	})
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
@@ -134,7 +139,7 @@ func run(ctx context.Context) error {
 		PropagateHandler: handler.Propagate(propagator),
 		ReplicateHandler: handler.Replicate(replicator),
 		ServiceName:      cfg.ServiceName,
-		TracingEnabled:   cfg.TracingEnabled,
+		TracingEnabled:   cfg.TracingExporter != "none",
 	})
 
 	srv := &http.Server{
@@ -160,11 +165,11 @@ func run(ctx context.Context) error {
 			return err // Server failed to start
 		}
 	case <-sig.Done(): // Graceful shutdown signal received
-		shutdownSignalDeadline = time.Now().Add(cfg.ServerGracefulShutdownTimeout)
+		shutdownSignalDeadline = time.Now().Add(cfg.ShutdownTimeout)
 	}
 
 	log.Debug().
-		Dur("timeout", cfg.ServerGracefulShutdownTimeout).
+		Dur("timeout", cfg.ShutdownTimeout).
 		Msg("initiating graceful shutdown")
 
 	// Remove the signal handler immediately to ensure following signals

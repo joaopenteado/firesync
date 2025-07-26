@@ -20,20 +20,22 @@ type Manager struct {
 }
 
 type Options struct {
-	ProjectID        string
-	ServiceName      string
-	ServiceRevision  string
-	InstanceID       string
-	TracingEnabled   bool
-	MetricsEnabled   bool
-	Environment      string
-	TraceSampleRatio float64
+	ProjectID                  string
+	ServiceName                string
+	ServiceRevision            string
+	InstanceID                 string
+	Environment                string
+	TracingExporter            string
+	MetricsExporter            string
+	OTLPProtocol               string
+	ConsoleExporterPrettyPrint bool
+	TraceSampleRatio           float64
 }
 
 func NewManager(ctx context.Context, opts Options) *Manager {
 	m := &Manager{}
 
-	if !opts.TracingEnabled && !opts.MetricsEnabled {
+	if opts.TracingExporter == "none" && opts.MetricsExporter == "none" {
 		return m // no-op manager, nothing to clean up
 	}
 
@@ -50,23 +52,31 @@ func NewManager(ctx context.Context, opts Options) *Manager {
 	}
 
 	m.initTracerProvider(ctx, res, opts)
-	m.initMetricProvider(res, opts)
+	m.initMetricProvider(ctx, res, opts)
 
 	return m
 }
 
 func (m *Manager) initTracerProvider(ctx context.Context, res *resource.Resource, opts Options) {
-	if !opts.TracingEnabled {
+	if opts.TracingExporter == "none" {
 		return
 	}
 
 	var exporter sdktrace.SpanExporter
 	var err error
 
-	if opts.Environment == "local" {
-		exporter, err = NewStdoutTraceExporter()
-	} else {
-		exporter, err = NewCloudTraceExporter(ctx)
+	switch opts.TracingExporter {
+	case "console":
+		exporter, err = NewStdoutTraceExporter(opts.ConsoleExporterPrettyPrint)
+	case "otlp":
+		if opts.OTLPProtocol != "grpc" {
+			log.Warn().Str("otlp_protocol", opts.OTLPProtocol).Msg("unsupported otlp protocol: tracing will be disabled")
+			return
+		}
+		exporter, err = NewOTLPTraceExporter(ctx)
+	default:
+		log.Warn().Str("tracing_exporter", opts.TracingExporter).Msg("unsupported tracing exporter: tracing will be disabled")
+		return
 	}
 
 	if err != nil {
@@ -81,24 +91,36 @@ func (m *Manager) initTracerProvider(ctx context.Context, res *resource.Resource
 	)
 }
 
-func (m *Manager) initMetricProvider(res *resource.Resource, opts Options) {
-	if !opts.MetricsEnabled {
+func (m *Manager) initMetricProvider(ctx context.Context, res *resource.Resource, opts Options) {
+	if opts.MetricsExporter == "none" {
 		return
 	}
 
-	var mr sdkmetric.Reader
+	var me sdkmetric.Exporter
 	var err error
 
-	if opts.Environment == "local" {
-		mr, err = NewStdoutMetricReader()
-	} else {
-		mr, err = NewCloudMonitoringMetricReader(opts.ProjectID)
+	switch opts.MetricsExporter {
+	case "console":
+		me, err = NewStdoutMetricExporter(opts.ConsoleExporterPrettyPrint)
+	case "otlp":
+		if opts.OTLPProtocol != "grpc" {
+			log.Warn().Str("otlp_protocol", opts.OTLPProtocol).Msg("unsupported otlp protocol: metrics will be disabled")
+			return
+		}
+		me, err = NewOTLPMetricExporter(ctx)
+	case "googlecloudmetrics":
+		me, err = NewCloudMonitoringMetricExporter(opts.ProjectID)
+	default:
+		log.Warn().Str("metrics_exporter", opts.MetricsExporter).Msg("unsupported metrics exporter: metrics will be disabled")
+		return
 	}
 
 	if err != nil {
-		log.Warn().Err(err).Msg("failed to create metric reader: metrics will be disabled")
+		log.Warn().Err(err).Msg("failed to create metric exporter: metrics will be disabled")
 		return
 	}
+
+	mr := sdkmetric.NewPeriodicReader(me)
 
 	m.mp = sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(mr),

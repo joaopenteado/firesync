@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"net/url"
+	"os"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
@@ -23,9 +25,30 @@ func NewCloudTraceExporter(ctx context.Context) (sdktrace.SpanExporter, error) {
 	)
 }
 
+// NewOTLPTraceExporter returns an OTLP gRPC trace exporter for services like Uptrace.
+func NewOTLPTraceExporter(ctx context.Context) (sdktrace.SpanExporter, error) {
+	endpoint := getFirstEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT")
+
+	if url, err := url.Parse(endpoint); err == nil && url.Hostname() == "telemetry.googleapis.com" {
+		return NewCloudTraceExporter(ctx)
+	}
+
+	return otlptracegrpc.New(ctx)
+}
+
 // NewStdoutTraceExporter returns a stdout trace exporter for local development.
-func NewStdoutTraceExporter() (sdktrace.SpanExporter, error) {
-	return stdouttrace.New(
-		stdouttrace.WithPrettyPrint(),
-	)
+func NewStdoutTraceExporter(prettyPrint bool) (sdktrace.SpanExporter, error) {
+	if prettyPrint {
+		return stdouttrace.New(stdouttrace.WithPrettyPrint())
+	}
+	return stdouttrace.New()
+}
+
+func getFirstEnv(envs ...string) string {
+	for _, env := range envs {
+		if value := os.Getenv(env); value != "" {
+			return value
+		}
+	}
+	return ""
 }
