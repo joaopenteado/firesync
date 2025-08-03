@@ -1,0 +1,119 @@
+name: firesync
+
+services:
+
+  pubsub:
+    image: google/cloud-sdk:emulators
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8080
+    restart: no
+
+  firestore:
+    image: google/cloud-sdk:emulators
+    command: gcloud beta emulators firestore start --host-port=0.0.0.0:8080
+    restart: no
+
+  simulator:
+    build:
+      context: ..
+      dockerfile: dev/Dockerfile
+      args:
+        BUILD_PATH: ./cmd/simulator
+    develop:
+      watch:
+        - action: rebuild
+          path: ../
+          include: '**/*.go'
+    environment:
+      PUBSUB_EMULATOR_HOST: pubsub:8080
+      FIRESTORE_EMULATOR_HOST: firestore:8080
+      GOOGLE_CLOUD_PROJECT: firesync
+      TOPIC: firesync
+      REPLICATOR_URLS: http://firesync-us-east4:8080/v1/replicate,http://firesync-us-west1:8080/v1/replicate
+      PROPAGATOR_URLS: http://firesync-us-east4:8080/v1/propagate,http://firesync-us-west1:8080/v1/propagate
+      FIRESTORE_COLLECTIONS: projects/firesync/databases/us-east4/documents/test,projects/firesync/databases/us-west1/documents/test
+    depends_on:
+      - firestore
+      - pubsub
+    restart: no
+
+  firesync-us-east4:
+    extends:
+      file: firesync.yaml
+      service: firesync
+    environment:
+      DATABASE: projects/firesync/databases/us-east4
+      GOOGLE_CLOUD_REGION: us-east4
+      CLOUD_RUN_INSTANCE_ID: firesync-us-east4
+      K_SERVICE: firesync-us-east4
+    depends_on:
+      # - simulator
+      - uptrace
+
+  firesync-us-west1:
+    extends:
+      file: firesync.yaml
+      service: firesync
+    environment:
+      DATABASE: projects/firesync/databases/us-west1
+      GOOGLE_CLOUD_REGION: us-west1
+      CLOUD_RUN_INSTANCE_ID: firesync-us-west1
+      K_SERVICE: firesync-us-west1
+    depends_on:
+      # - simulator
+      - uptrace
+
+  #
+  # Telemetry
+  #
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3.5
+    restart: on-failure
+    environment:
+      CLICKHOUSE_USER: uptrace
+      CLICKHOUSE_PASSWORD: uptrace
+      CLICKHOUSE_DB: uptrace
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'localhost:8123/ping']
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    volumes:
+      - chdata:/var/lib/clickhouse
+
+  postgres:
+    image: postgres:17-alpine
+    restart: on-failure
+    environment:
+      POSTGRES_USER: uptrace
+      POSTGRES_PASSWORD: uptrace
+      POSTGRES_DB: uptrace
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U uptrace -d uptrace']
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    volumes:
+      - 'pgdata:/var/lib/postgresql/data'
+
+  redis:
+    image: redis:6.2.2-alpine
+    restart: on-failure
+
+  uptrace:
+    image: 'uptrace/uptrace:2.0.0'
+    restart: on-failure
+    volumes:
+      - ./uptrace.yml:/etc/uptrace/config.yml:ro
+    ports:
+      - '127.0.0.1:8080:8080'
+    depends_on:
+      - clickhouse
+      - postgres
+    labels:
+      - "com.docker.compose.dev.watch=true"
+      - "com.docker.compose.dev.watch.files=./uptrace.yml"
+
+volumes:
+  chdata:
+  pgdata:
