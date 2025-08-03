@@ -72,3 +72,11 @@ func TestNewDocumentFromPath(t *testing.T) {
 		})
 	}
 }
+
+func TestDocumentName_String(t *testing.T) {
+	d := &DocumentName{ProjectID: "p", DatabaseID: "d", Path: "col/doc"}
+	want := "projects/p/databases/d/documents/col/doc"
+	if got := d.String(); got != want {
+		t.Errorf("DocumentName.String() = %q, want %q", got, want)
+	}
+}
