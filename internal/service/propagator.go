@@ -258,13 +258,15 @@ func (svc *propagator) processDeleteEvent(ctx context.Context, event *model.Even
 
 		if snap.Exists() {
 			var ts time.Time
-			md := &model.Metadata{}
-			if err := snap.DataTo(md); err != nil {
+			md := struct {
+				Metadata *model.Metadata `firestore:"_firesync"`
+			}{}
+			if err := snap.DataTo(&md); err != nil {
 				// create change might have not been propagated yet
 				// use the create time of the document
 				ts = event.Timestamp
 			} else {
-				ts = md.Timestamp.AsTime()
+				ts = md.Metadata.Timestamp.AsTime()
 			}
 
 			if ts.After(event.Timestamp) {
