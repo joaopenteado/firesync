@@ -13,6 +13,7 @@ type Replicator interface {
 
 func Replicate(svc Replicator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
 		w.WriteHeader(http.StatusOK)
 	})
 }

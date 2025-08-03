@@ -35,17 +35,13 @@ const (
 )
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if err := run(ctx); err != nil {
-		cancel() // Cancel root context when os.Exit() is called.
+	if err := run(context.Background()); err != nil {
 		log.Fatal().Err(err).Msg("failed to run service")
 	}
 }
 
 func run(ctx context.Context) error {
-	var shutdownSignalDeadline time.Time
+	var shutdownDeadline time.Time
 
 	initCtx, initCancel := context.WithTimeout(ctx, InitializationTimeout)
 	defer initCancel()
@@ -104,7 +100,7 @@ func run(ctx context.Context) error {
 	otel.SetTracerProvider(telemetryManager.TracerProvider())
 	otel.SetMeterProvider(telemetryManager.MeterProvider())
 	defer func() {
-		ctx, cancel := context.WithDeadline(ctx, shutdownSignalDeadline)
+		ctx, cancel := context.WithDeadline(ctx, shutdownDeadline)
 		defer cancel()
 		if err := telemetryManager.Shutdown(ctx); err != nil {
 			log.Warn().Err(err).Msg("failed to shutdown telemetry manager")
@@ -132,16 +128,17 @@ func run(ctx context.Context) error {
 		}
 	}()
 
-	propagator := service.NewPropagator(pubsubClient.Topic(cfg.Topic), meter)
+	propagator := service.NewPropagator(pubsubClient.Topic(cfg.Topic), firestoreClient, cfg.TombstoneTTL, meter)
 	replicator := service.NewReplicator(meter, firestoreClient)
 
 	r := router.New(router.Config{
-		PropagateHandler: handler.Propagate(propagator),
+		PropagateHandler: handler.Propagate(propagator, handler.WithHTTP200Acknowledgement(cfg.ForceHTTP200Acknowledgement)),
 		ReplicateHandler: handler.Replicate(replicator),
 		ServiceName:      cfg.ServiceName,
 		TracingEnabled:   cfg.TracingExporter != "none",
 	})
 
+	// TODO: configuration for the http server
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
 		Handler: r,
@@ -165,7 +162,7 @@ func run(ctx context.Context) error {
 			return err // Server failed to start
 		}
 	case <-sig.Done(): // Graceful shutdown signal received
-		shutdownSignalDeadline = time.Now().Add(cfg.ShutdownTimeout)
+		shutdownDeadline = time.Now().Add(cfg.ShutdownTimeout)
 	}
 
 	log.Debug().
@@ -176,7 +173,7 @@ func run(ctx context.Context) error {
 	// forcefully terminate the application.
 	stop()
 
-	shutdownCtx, cancel := context.WithDeadline(ctx, shutdownSignalDeadline)
+	shutdownCtx, cancel := context.WithDeadline(ctx, shutdownDeadline)
 	defer cancel()
 
 	errCh = make(chan error)

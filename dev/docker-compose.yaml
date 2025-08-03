@@ -3,67 +3,64 @@ name: firesync
 services:
 
   pubsub:
-    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    image: google/cloud-sdk:emulators
     command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8080
     restart: no
 
   firestore:
-    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    image: google/cloud-sdk:emulators
     command: gcloud beta emulators firestore start --host-port=0.0.0.0:8080
     restart: no
 
-  # simulator:
-  #   build:
-  #     context: ..
-  #     dockerfile: dev/Dockerfile
-  #     args:
-  #       BUILD_PATH: ./cmd/simulator
-  #   environment:
-  #     PUBSUB_EMULATOR_HOST: pubsub:8080
-  #     FIRESTORE_EMULATOR_HOST: firestore:8080
-  #   depends_on:
-  #     - firestore
-  #     - pubsub
-  #   restart: no
-
-  firesync-a:
+  simulator:
     build:
       context: ..
       dockerfile: dev/Dockerfile
       args:
-        BUILD_PATH: ./cmd/firesync
+        BUILD_PATH: ./cmd/simulator
     develop:
       watch:
         - action: rebuild
           path: ../
           include: '**/*.go'
-        # - action: restart
-        #   target: firesync-a
-        #   restart: no
     environment:
       PUBSUB_EMULATOR_HOST: pubsub:8080
       FIRESTORE_EMULATOR_HOST: firestore:8080
-      DATABASE: projects/firesync/databases/firesync-a
-      TOPIC: projects/firesync/topics/firesync
-      ENVIRONMENT: local
+      GOOGLE_CLOUD_PROJECT: firesync
+      TOPIC: firesync
+      REPLICATOR_URLS: http://firesync-us-east4:8080/v1/replicate,http://firesync-us-west1:8080/v1/replicate
+      PROPAGATOR_URLS: http://firesync-us-east4:8080/v1/propagate,http://firesync-us-west1:8080/v1/propagate
+      FIRESTORE_COLLECTIONS: projects/firesync/databases/us-east4/documents/test,projects/firesync/databases/us-west1/documents/test
+    depends_on:
+      - firestore
+      - pubsub
+    restart: no
 
-      # OpenTelemetry configuration for Uptrace
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://uptrace:4317
-      OTEL_EXPORTER_OTLP_INSECURE: "true"
-      OTEL_EXPORTER_OTLP_HEADERS: uptrace-dsn=http://firesync_secret@localhost:8080?grpc=4317
-      OTEL_EXPORTER_OTLP_COMPRESSION: gzip
-      OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION: BASE2_EXPONENTIAL_BUCKET_HISTOGRAM
-      OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: DELTA
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+  firesync-us-east4:
+    extends:
+      file: firesync.yaml
+      service: firesync
+    environment:
+      DATABASE: projects/firesync/databases/us-east4
+      GOOGLE_CLOUD_REGION: us-east4
+      CLOUD_RUN_INSTANCE_ID: firesync-us-east4
+      K_SERVICE: firesync-us-east4
     depends_on:
       # - simulator
       - uptrace
-    restart: no
+
+  firesync-us-west1:
+    extends:
+      file: firesync.yaml
+      service: firesync
+    environment:
+      DATABASE: projects/firesync/databases/us-west1
+      GOOGLE_CLOUD_REGION: us-west1
+      CLOUD_RUN_INSTANCE_ID: firesync-us-west1
+      K_SERVICE: firesync-us-west1
+    depends_on:
+      # - simulator
+      - uptrace
 
   #
   # Telemetry

@@ -3,16 +3,23 @@ package service
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
+	"cloud.google.com/go/firestore"
 	"cloud.google.com/go/pubsub"
-	"github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
+	"github.com/joaopenteado/firesync/internal/model"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type propagationMetrics struct {
@@ -51,19 +58,25 @@ func newPropagationMetrics(meter metric.Meter) propagationMetrics {
 
 type propagator struct {
 	topic   *pubsub.Topic
+	db      *firestore.Client
 	metrics propagationMetrics
+
+	tombstoneTTL time.Duration
 }
 
-type PropagationResult uint8
+type PropagationResult uint
 
 const (
-	PropagationResultSuccess PropagationResult = iota
+	PropagationResultUnknown PropagationResult = iota
+	PropagationResultSuccess
 	PropagationResultSkipped
 	PropagationResultError
 )
 
 func (r PropagationResult) String() string {
 	switch r {
+	case PropagationResultUnknown:
+		return "unknown"
 	case PropagationResultSuccess:
 		return "success"
 	case PropagationResultSkipped:
@@ -75,195 +88,320 @@ func (r PropagationResult) String() string {
 	}
 }
 
-func NewPropagator(topic *pubsub.Topic, meter metric.Meter) *propagator {
+func NewPropagator(topic *pubsub.Topic, db *firestore.Client, tombstoneTTL time.Duration, meter metric.Meter) *propagator {
 	return &propagator{
-		topic:   topic,
-		metrics: newPropagationMetrics(meter),
+		topic:        topic,
+		db:           db,
+		metrics:      newPropagationMetrics(meter),
+		tombstoneTTL: tombstoneTTL,
 	}
 }
 
-func (svc *propagator) Propagate(ctx context.Context, eventTime time.Time, event *firestoredata.DocumentEventData) (PropagationResult, error) {
-	docName := parseDocumentName(event)
-	if docName.ProjectID == "" || docName.DatabaseID == "" || docName.DocumentPath == "" {
+func (svc *propagator) Propagate(ctx context.Context, event *model.Event) (result PropagationResult, err error) {
+	logger := zerolog.Ctx(ctx).With().
+		Stringer("event_type", event.Type).
+		Str("project_id", event.Name.ProjectID).
+		Str("database_id", event.Name.DatabaseID).
+		Str("document_path", event.Name.Path).
+		Logger()
+	ctx = logger.WithContext(ctx)
+
+	defer func() {
 		svc.metrics.PropagationEventCount.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("result", PropagationResultError.String()),
+			attribute.String("result", result.String()),
 		))
-		// TODO: this should result in a 4XX error
-		return PropagationResultError, fmt.Errorf("invalid document name format")
+
+		if result == PropagationResultSuccess {
+			svc.metrics.PropagationLatency.Record(ctx, time.Since(event.Timestamp).Milliseconds())
+		}
+	}()
+
+	var shouldPropagate bool
+	switch event.Type {
+	case model.EventTypeReplicated, model.EventTypeTombstone:
+		shouldPropagate = false
+
+	case model.EventTypeCreated:
+		shouldPropagate, err = svc.processCreateEvent(ctx, event)
+
+	case model.EventTypeUpdated:
+		shouldPropagate, err = svc.processUpdateEvent(ctx, event)
+
+	case model.EventTypeDeleted:
+		shouldPropagate, err = svc.processDeleteEvent(ctx, event)
+
+	default:
+		return PropagationResultUnknown, fmt.Errorf("unknown event type: %s", event.Type)
 	}
 
-	eventType := newEventType(docName, event)
-	logger := zerolog.Ctx(ctx).With().
-		Stringer("event_type", eventType).
-		Str("project_id", docName.ProjectID).
-		Str("database_id", docName.DatabaseID).
-		Str("document_path", docName.DocumentPath).
-		Logger()
+	if err != nil {
+		return PropagationResultError, fmt.Errorf("failed to process event: %w", err)
+	}
 
-	if eventType == eventTypeReplicated || eventType == eventTypeTombstone {
+	if !shouldPropagate {
 		logger.Debug().Msg("event propagation skipped")
-		svc.metrics.PropagationEventCount.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("result", PropagationResultSkipped.String()),
-		))
 		return PropagationResultSkipped, nil
 	}
 
-	logger.Debug().Msg("processing event for propagation")
+	marshaledRawEvent, err := proto.Marshal(event.Data)
+	if err != nil {
+		return PropagationResultError, fmt.Errorf("failed to marshal event: %w", err)
+	}
 
-	svc.metrics.PropagationEventCount.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("result", PropagationResultSuccess.String()),
-	))
+	attrs := map[string]string{
+		"content-type":  "application/protobuf",
+		"event-time":    event.Timestamp.Format(time.RFC3339Nano),
+		"event-type":    event.Type.String(),
+		"project-id":    event.Name.ProjectID,
+		"database-id":   event.Name.DatabaseID,
+		"document-path": event.Name.Path,
+	}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(attrs))
+
+	res := svc.topic.Publish(ctx, &pubsub.Message{
+		Data:       marshaledRawEvent,
+		Attributes: attrs,
+	})
+
+	msgID, err := res.Get(ctx)
+	if err != nil {
+		return PropagationResultError, fmt.Errorf("failed to get message ID: %w", err)
+	}
+
+	logger.Debug().Str("message_id", msgID).Msg("event propagated")
+
 	return PropagationResultSuccess, nil
-
 }
 
-type eventType uint8
-
-const (
-	eventTypeCreate eventType = iota
-	eventTypeUpdate
-	eventTypeDelete
-	eventTypeReplicated
-	eventTypeTombstone
-)
-
-func (e eventType) String() string {
-	switch e {
-	case eventTypeCreate:
-		return "create"
-	case eventTypeUpdate:
-		return "update"
-	case eventTypeDelete:
-		return "delete"
-	case eventTypeReplicated:
-		return "replicated"
-	case eventTypeTombstone:
-		return "tombstone"
-	default:
-		return fmt.Sprintf("unknown (%d)", e)
-	}
-}
-
-func newEventType(docName documentName, event *firestoredata.DocumentEventData) eventType {
-	// If no old value, this is a create event
-	if event.GetOldValue() == nil {
-		doc := event.GetValue()
-		if doc == nil {
-			return eventTypeCreate
+func (svc *propagator) processCreateEvent(ctx context.Context, event *model.Event) (shouldPropagate bool, err error) {
+	logger := zerolog.Ctx(ctx)
+	err = svc.db.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		// check if the document tombstone exists with a read
+		snap, err := tx.Get(event.Name.TombstoneRef(svc.db))
+		if err != nil && status.Code(err) != codes.NotFound {
+			return err
 		}
 
-		// Check if this is a tombstone for a replicated delete event
-		// Document path starts with _firesync/ indicates internal firesync bookkeeping
-		if strings.HasPrefix(docName.DocumentPath, "_firesync/") {
-			return eventTypeTombstone
+		// if the tombstone exists and the timestamp is more recent than the
+		// document's create time, this is a replicated delete event
+		if snap.Exists() {
+			tombstone := &model.Tombstone{}
+			if err := snap.DataTo(tombstone); err != nil {
+				return fmt.Errorf("failed to unmarshal tombstone: %w", err)
+			}
+
+			if tombstone.Timestamp.AsTime().After(event.Timestamp) {
+				// delete the document, a more recent tombstone exists
+				err = tx.Delete(event.Name.Ref(svc.db), firestore.LastUpdateTime(event.Timestamp))
+				if status.Code(err) == codes.FailedPrecondition {
+					logger.Debug().Msg("stale event, skipping propagation")
+					return nil
+				}
+				return err
+			}
+
+			// tombstone exists but is older than the document's create time
+			// it can be deleted, but we will leave it up to the garbage
+			// collector
 		}
 
-		// Check if this was a replicated create event
-		if _, ok := doc.GetFields()["_firesync"]; ok {
-			// Only replicated create events have _firesync field right away
-			return eventTypeReplicated
+		metadata := &model.Metadata{
+			Timestamp: timestamppb.New(event.Timestamp),
+			Source:    fmt.Sprintf("projects/%s/databases/%s", event.Name.ProjectID, event.Name.DatabaseID),
+			Trace:     trace.SpanContextFromContext(ctx).TraceID().String(),
 		}
 
-		return eventTypeCreate
-	}
-
-	// If no new value, this is a delete event
-	if event.GetValue() == nil {
-		return eventTypeDelete
-	}
-
-	// Both old and new values exist, this is an update
-
-	// If any of the updated fields are in the _firesync map field, this is a
-	// change made by firesync
-	updatedFieldPaths := event.GetUpdateMask().GetFieldPaths()
-	if hasAnyFiresyncFields(updatedFieldPaths) {
-		return eventTypeReplicated
-	}
-
-	return eventTypeUpdate
-}
-
-type documentName struct {
-	ProjectID    string
-	DatabaseID   string
-	DocumentPath string
-	IsOld        bool
-}
-
-func parseDocumentName(event *firestoredata.DocumentEventData) documentName {
-	const (
-		projectsPrefix = "projects/"
-		databasesInfix = "/databases/"
-		documentsInfix = "/documents/"
-		minValidLength = len(projectsPrefix) + 1 + len(databasesInfix) + 1 + len(documentsInfix) + 1
-	)
-
-	d := documentName{}
-
-	var name string
-	if event.GetValue() != nil {
-		name = event.GetValue().GetName()
-	}
-
-	if name == "" && event.GetOldValue() != nil {
-		name = event.GetOldValue().GetName()
-		d.IsOld = true
-	}
-
-	// Early validation - return empty documentName if any validation fails
-	if len(name) < minValidLength {
-		return documentName{}
-	}
-
-	if !strings.HasPrefix(name, projectsPrefix) {
-		return documentName{}
-	}
-
-	dbStart := strings.Index(name[len(projectsPrefix):], databasesInfix)
-	if dbStart == -1 {
-		return documentName{}
-	}
-	dbStart += len(projectsPrefix) // Adjust for the prefix we skipped
-
-	projectID := name[len(projectsPrefix):dbStart]
-	if projectID == "" || strings.Contains(projectID, "/") {
-		return documentName{}
-	}
-
-	docStart := strings.Index(name[dbStart+len(databasesInfix):], documentsInfix)
-	if docStart == -1 {
-		return documentName{}
-	}
-	docStart += dbStart + len(databasesInfix) // Adjust for the sections we skipped
-
-	databaseID := name[dbStart+len(databasesInfix) : docStart]
-	if databaseID == "" || strings.Contains(databaseID, "/") {
-		return documentName{}
-	}
-
-	documentPath := name[docStart+len(documentsInfix):]
-	if documentPath == "" {
-		return documentName{}
-	}
-
-	// All validations passed, populate the struct
-	d.ProjectID = projectID
-	d.DatabaseID = databaseID
-	d.DocumentPath = documentPath
-
-	return d
-}
-
-func (d documentName) String() string {
-	return fmt.Sprintf("projects/%s/databases/%s/documents/%s", d.ProjectID, d.DatabaseID, d.DocumentPath)
-}
-
-func hasAnyFiresyncFields(fieldNames []string) bool {
-	for _, fieldName := range fieldNames {
-		if fieldName == "_firesync" || strings.HasPrefix(fieldName, "_firesync.") {
-			return true
+		// if the tombstone does not exist or is older than the document's
+		// create time, we can add firesync metadata to the document
+		err = tx.Update(event.Name.Ref(svc.db), []firestore.Update{
+			{
+				Path:  "_firesync",
+				Value: metadata,
+			},
+		}, firestore.LastUpdateTime(event.Timestamp))
+		if status.Code(err) == codes.FailedPrecondition {
+			logger.Debug().Msg("stale event, skipping propagation")
+			return nil
 		}
+		if err != nil {
+			return fmt.Errorf("failed to update document: %w", err)
+		}
+
+		shouldPropagate = true
+		return nil
+	})
+
+	if err != nil {
+		return false, fmt.Errorf("failed to update document: %w", err)
 	}
-	return false
+
+	return shouldPropagate, nil
+}
+
+func (svc *propagator) processDeleteEvent(ctx context.Context, event *model.Event) (shouldPropagate bool, err error) {
+	logger := zerolog.Ctx(ctx)
+
+	tombstone := &model.Tombstone{
+		Document:   event.Name.Ref(svc.db),
+		Timestamp:  timestamppb.New(event.Timestamp),
+		Source:     fmt.Sprintf("projects/%s/databases/%s", event.Name.ProjectID, event.Name.DatabaseID),
+		Trace:      trace.SpanContextFromContext(ctx).TraceID().String(),
+		Expiration: timestamppb.New(event.Timestamp.Add(svc.tombstoneTTL)),
+	}
+
+	err = svc.db.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		// check if a new document has been created
+		snap, err := tx.Get(event.Name.Ref(svc.db))
+		if err != nil && status.Code(err) != codes.NotFound {
+			return err
+		}
+
+		if snap.Exists() {
+			var ts time.Time
+			md := &model.Metadata{}
+			if err := snap.DataTo(md); err != nil {
+				// create change might have not been propagated yet
+				// use the create time of the document
+				ts = event.Timestamp
+			} else {
+				ts = md.Timestamp.AsTime()
+			}
+
+			if ts.After(event.Timestamp) {
+				logger.Debug().Msg("newer document exists, skipping propagation")
+				return nil
+			}
+
+			// delete the document to keep consistency
+			err = tx.Delete(event.Name.Ref(svc.db), firestore.LastUpdateTime(ts))
+			if status.Code(err) == codes.FailedPrecondition {
+				logger.Debug().Msg("stale event, skipping propagation")
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+		}
+
+		// check if a more recent tombstone exists
+		snap, err = tx.Get(event.Name.TombstoneRef(svc.db))
+		if err != nil && status.Code(err) != codes.NotFound {
+			return err
+		}
+
+		if snap.Exists() {
+			tombstone := &model.Tombstone{}
+			if err := snap.DataTo(tombstone); err != nil {
+				return fmt.Errorf("failed to unmarshal tombstone: %w", err)
+			}
+
+			if tombstone.Timestamp.AsTime().After(event.Timestamp) {
+				logger.Debug().Msg("newer tombstone already exists, skipping propagation")
+				return nil
+			}
+
+			err = tx.Update(event.Name.TombstoneRef(svc.db), []firestore.Update{
+				{
+					Path:  "ts",
+					Value: tombstone.Timestamp,
+				},
+				{
+					Path:  "src",
+					Value: tombstone.Source,
+				},
+				{
+					Path:  "trace",
+					Value: tombstone.Trace,
+				},
+				{
+					Path:  "exp",
+					Value: tombstone.Expiration,
+				},
+			}, firestore.LastUpdateTime(event.Timestamp))
+			if status.Code(err) == codes.FailedPrecondition {
+				logger.Debug().Msg("stale event, skipping propagation")
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("failed to update tombstone: %w", err)
+			}
+
+			shouldPropagate = true
+			return nil
+		}
+
+		err = tx.Create(event.Name.TombstoneRef(svc.db), tombstone)
+		if err != nil {
+			return fmt.Errorf("failed to create tombstone: %w", err)
+		}
+
+		shouldPropagate = true
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to update document: %w", err)
+	}
+
+	return shouldPropagate, nil
+}
+
+func (svc *propagator) processUpdateEvent(ctx context.Context, event *model.Event) (shouldPropagate bool, err error) {
+	logger := zerolog.Ctx(ctx)
+
+	err = svc.db.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		// check if a tombstone exists
+		snap, err := tx.Get(event.Name.TombstoneRef(svc.db))
+		if err != nil && status.Code(err) != codes.NotFound {
+			return err
+		}
+
+		if snap.Exists() {
+			tombstone := &model.Tombstone{}
+			if err := snap.DataTo(tombstone); err != nil {
+				return fmt.Errorf("failed to unmarshal tombstone: %w", err)
+			}
+
+			if tombstone.Timestamp.AsTime().After(event.Timestamp) {
+				logger.Debug().Msg("newer tombstone exists, skipping propagation and deleting the document")
+				err := tx.Delete(event.Name.Ref(svc.db), firestore.LastUpdateTime(event.Timestamp))
+				if status.Code(err) == codes.FailedPrecondition {
+					logger.Debug().Msg("stale event, skipping propagation")
+					return nil
+				}
+				if err != nil {
+					return fmt.Errorf("failed to delete document: %w", err)
+				}
+				return nil
+			}
+		}
+
+		metadata := &model.Metadata{
+			Timestamp: timestamppb.New(event.Timestamp),
+			Source:    fmt.Sprintf("projects/%s/databases/%s", event.Name.ProjectID, event.Name.DatabaseID),
+			Trace:     trace.SpanContextFromContext(ctx).TraceID().String(),
+		}
+
+		err = tx.Update(event.Name.Ref(svc.db), []firestore.Update{
+			{
+				Path:  "_firesync",
+				Value: metadata,
+			},
+		}, firestore.LastUpdateTime(event.Timestamp))
+		if status.Code(err) == codes.FailedPrecondition {
+			logger.Debug().Msg("stale event, skipping propagation")
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to update document: %w", err)
+		}
+
+		shouldPropagate = true
+		return nil
+	})
+
+	if err != nil {
+		return false, fmt.Errorf("failed to update document: %w", err)
+	}
+
+	return shouldPropagate, nil
 }

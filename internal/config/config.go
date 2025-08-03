@@ -67,6 +67,17 @@ type Config struct {
 	// "{topic_id}".
 	Topic string `env:"TOPIC, default=firesync"`
 
+	// ForceHTTP200Acknowledgement forces the handler to return a 200 OK instead
+	// of semantically correct status codes for suceful message acknowledgements
+	// from the Pub/Sub API. This is necessary for the simulator to work, since it
+	// does not recognize status codes other than 200 OK as successful
+	// acknowledgements.
+	// See https://issuetracker.google.com/issues/434641504
+	ForceHTTP200Acknowledgement bool `env:"FORCE_HTTP_200_ACKNOWLEDGEMENT, default=false"`
+
+	// TombstoneTTL is the time to live for tombstones.
+	TombstoneTTL time.Duration `env:"TOMBSTONE_TTL, default=24h"`
+
 	// LogLevel controls the verbosity of the logs.
 	LogLevel zerolog.Level `env:"LOG_LEVEL, default=info"`
 
@@ -102,16 +113,18 @@ func environmentDefaults(env string) envconfig.Lookuper {
 	switch env {
 	case EnvironmentLocal:
 		return envconfig.MapLookuper(map[string]string{
-			"GOOGLE_CLOUD_PROJECT":    "firesync",
-			"GOOGLE_CLOUD_REGION":     "us-central1",
-			"CLOUD_RUN_INSTANCE_ID":   "local",
-			"K_SERVICE":               "firesync",
-			"K_REVISION":              "local",
-			"K_CONFIGURATION":         "local",
-			"LOG_LEVEL":               "debug",
-			"OTEL_TRACES_EXPORTER":    "otlp",
-			"OTEL_METRICS_EXPORTER":   "otlp",
-			"OTEL_TRACES_SAMPLER_ARG": "1.0",
+			"GOOGLE_CLOUD_PROJECT":           "firesync",
+			"GOOGLE_CLOUD_REGION":            "us-central1",
+			"CLOUD_RUN_INSTANCE_ID":          "local",
+			"K_SERVICE":                      "firesync",
+			"K_REVISION":                     "local",
+			"K_CONFIGURATION":                "local",
+			"FORCE_HTTP_200_ACKNOWLEDGEMENT": "true",
+			"LOG_LEVEL":                      "debug",
+			"LOG_PRETTY":                     "true",
+			"OTEL_TRACES_EXPORTER":           "otlp",
+			"OTEL_METRICS_EXPORTER":          "otlp",
+			"OTEL_TRACES_SAMPLER_ARG":        "1.0",
 		})
 	case EnvironmentDevelopment:
 		return envconfig.MapLookuper(map[string]string{

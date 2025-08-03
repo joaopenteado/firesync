@@ -22,6 +22,8 @@ func New(cfg Config) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(
+		// TODO: use custom recoverer and health checks to integrate with otel
+		// and zerolog
 		chimiddleware.Recoverer,
 		chimiddleware.Timeout(10*time.Second),
 		chimiddleware.Heartbeat("/healthz"), // Liveness probe
