@@ -61,7 +61,7 @@ func ParseEvent(event *firestoredata.DocumentEventData, eventTime time.Time) (*E
 		}
 
 		// check if this is a tombstone
-		if strings.HasPrefix(docName.Path, TombstoneCollection) {
+		if strings.HasPrefix(docName.Path, TombstoneCollection+"/") {
 			return &Event{
 				Type:      EventTypeTombstone,
 				Name:      *docName,
