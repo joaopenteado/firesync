@@ -68,7 +68,7 @@ type Config struct {
 	Topic string `env:"TOPIC, default=firesync"`
 
 	// ForceHTTP200Acknowledgement forces the handler to return a 200 OK instead
-	// of semantically correct status codes for suceful message acknowledgements
+	// of semantically correct status codes for successful message acknowledgements
 	// from the Pub/Sub API. This is necessary for the simulator to work, since it
 	// does not recognize status codes other than 200 OK as successful
 	// acknowledgements.
