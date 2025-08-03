@@ -35,11 +35,10 @@ type funcPropagateOption func(*propagateOptions)
 
 func (f funcPropagateOption) apply(o *propagateOptions) { f(o) }
 
-// WithForceHTTP200Acknowledgement forces the handler to return a 200 OK instead
-// of semantically correct status codes for successful message acknowledgements
-// from the Pub/Sub API. This is necessary for the simulator to work, since it
-// does not recognize status codes other than 200 OK as successful
-// acknowledgements.
+// WithHTTP200Acknowledgement forces the handler to return 200 OK for successful
+// Pub/Sub message acknowledgements instead of semantically appropriate status
+// codes. This is necessary for the simulator, which only treats 200 OK as a
+// successful acknowledgement.
 // See https://issuetracker.google.com/issues/434641504
 func WithHTTP200Acknowledgement(enforce bool) propagateOption {
 	return funcPropagateOption(func(o *propagateOptions) {
