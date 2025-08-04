@@ -8,7 +8,7 @@ require (
 	cloud.google.com/go/profiler v0.4.3
 	cloud.google.com/go/pubsub v1.50.0
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.53.0
-	github.com/go-chi/chi v1.5.5
+	github.com/go-chi/chi v4.1.2+incompatible
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/googleapis/google-cloudevents-go v0.10.0
