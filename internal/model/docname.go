@@ -62,6 +62,12 @@ func (d *DocumentName) TombstoneRef(db *firestore.Client) *firestore.DocumentRef
 	return db.Collection(TombstoneCollection).Doc(TombstoneID(d.Path))
 }
 
+// TombstonePath returns the path for the tombstone document corresponding to the
+// document name.
+func (d *DocumentName) TombstonePath() string {
+	return fmt.Sprintf("%s/%s", TombstoneCollection, TombstoneID(d.Path))
+}
+
 func (d *DocumentName) String() string {
 	return fmt.Sprintf("projects/%s/databases/%s/documents/%s", d.ProjectID, d.DatabaseID, d.Path)
 }
