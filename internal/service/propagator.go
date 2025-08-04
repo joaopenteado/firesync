@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"cloud.google.com/go/firestore"
 	"cloud.google.com/go/pubsub"
 	"github.com/joaopenteado/firesync/internal/model"
 	"github.com/rs/zerolog"
@@ -57,8 +56,8 @@ func newPropagationMetrics(meter metric.Meter) propagationMetrics {
 }
 
 type propagator struct {
-	topic   *pubsub.Topic
-	db      *firestore.Client
+	topic   PubSubTopic
+	db      FirestoreClient
 	metrics propagationMetrics
 
 	tombstoneTTL time.Duration
@@ -88,7 +87,7 @@ func (r PropagationResult) String() string {
 	}
 }
 
-func NewPropagator(topic *pubsub.Topic, db *firestore.Client, tombstoneTTL time.Duration, meter metric.Meter) *propagator {
+func NewPropagator(topic PubSubTopic, db FirestoreClient, tombstoneTTL time.Duration, meter metric.Meter) *propagator {
 	return &propagator{
 		topic:        topic,
 		db:           db,
@@ -175,9 +174,9 @@ func (svc *propagator) Propagate(ctx context.Context, event *model.Event) (resul
 
 func (svc *propagator) processCreateEvent(ctx context.Context, event *model.Event) (shouldPropagate bool, err error) {
 	logger := zerolog.Ctx(ctx)
-	err = svc.db.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+	err = svc.db.RunTransaction(ctx, func(ctx context.Context, tx Transaction) error {
 		// check if the document tombstone exists with a read
-		snap, err := tx.Get(event.Name.TombstoneRef(svc.db))
+		snap, err := tx.Get(event.Name.TombstonePath())
 		if err != nil && status.Code(err) != codes.NotFound {
 			return err
 		}
@@ -192,7 +191,7 @@ func (svc *propagator) processCreateEvent(ctx context.Context, event *model.Even
 
 			if tombstone.Timestamp.AsTime().After(event.Timestamp) {
 				// delete the document, a more recent tombstone exists
-				err = tx.Delete(event.Name.Ref(svc.db), firestore.LastUpdateTime(event.Timestamp))
+				err = tx.Delete(event.Name.Path, event.Timestamp)
 				if status.Code(err) == codes.FailedPrecondition {
 					logger.Debug().Msg("stale event, skipping propagation")
 					return nil
@@ -213,12 +212,12 @@ func (svc *propagator) processCreateEvent(ctx context.Context, event *model.Even
 
 		// if the tombstone does not exist or is older than the document's
 		// create time, we can add firesync metadata to the document
-		err = tx.Update(event.Name.Ref(svc.db), []firestore.Update{
+		err = tx.Update(event.Name.Path, []Update{
 			{
 				Path:  "_firesync",
 				Value: metadata,
 			},
-		}, firestore.LastUpdateTime(event.Timestamp))
+		}, event.Timestamp)
 		if status.Code(err) == codes.FailedPrecondition {
 			logger.Debug().Msg("stale event, skipping propagation")
 			return nil
@@ -242,16 +241,16 @@ func (svc *propagator) processDeleteEvent(ctx context.Context, event *model.Even
 	logger := zerolog.Ctx(ctx)
 
 	tombstone := &model.Tombstone{
-		Document:   event.Name.Ref(svc.db),
+		Document:   svc.db.Doc(event.Name.Path),
 		Timestamp:  timestamppb.New(event.Timestamp),
 		Source:     fmt.Sprintf("projects/%s/databases/%s", event.Name.ProjectID, event.Name.DatabaseID),
 		Trace:      trace.SpanContextFromContext(ctx).TraceID().String(),
 		Expiration: timestamppb.New(event.Timestamp.Add(svc.tombstoneTTL)),
 	}
 
-	err = svc.db.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+	err = svc.db.RunTransaction(ctx, func(ctx context.Context, tx Transaction) error {
 		// check if a new document has been created
-		snap, err := tx.Get(event.Name.Ref(svc.db))
+		snap, err := tx.Get(event.Name.Path)
 		if err != nil && status.Code(err) != codes.NotFound {
 			return err
 		}
@@ -275,7 +274,7 @@ func (svc *propagator) processDeleteEvent(ctx context.Context, event *model.Even
 			}
 
 			// delete the document to keep consistency
-			err = tx.Delete(event.Name.Ref(svc.db), firestore.LastUpdateTime(ts))
+			err = tx.Delete(event.Name.Path, ts)
 			if status.Code(err) == codes.FailedPrecondition {
 				logger.Debug().Msg("stale event, skipping propagation")
 				return nil
@@ -286,7 +285,7 @@ func (svc *propagator) processDeleteEvent(ctx context.Context, event *model.Even
 		}
 
 		// check if a more recent tombstone exists
-		snap, err = tx.Get(event.Name.TombstoneRef(svc.db))
+		snap, err = tx.Get(event.Name.TombstonePath())
 		if err != nil && status.Code(err) != codes.NotFound {
 			return err
 		}
@@ -302,7 +301,7 @@ func (svc *propagator) processDeleteEvent(ctx context.Context, event *model.Even
 				return nil
 			}
 
-			err = tx.Update(event.Name.TombstoneRef(svc.db), []firestore.Update{
+			err = tx.Update(event.Name.TombstonePath(), []Update{
 				{
 					Path:  "ts",
 					Value: tombstone.Timestamp,
@@ -319,7 +318,7 @@ func (svc *propagator) processDeleteEvent(ctx context.Context, event *model.Even
 					Path:  "exp",
 					Value: tombstone.Expiration,
 				},
-			}, firestore.LastUpdateTime(event.Timestamp))
+			}, event.Timestamp)
 			if status.Code(err) == codes.FailedPrecondition {
 				logger.Debug().Msg("stale event, skipping propagation")
 				return nil
@@ -332,7 +331,7 @@ func (svc *propagator) processDeleteEvent(ctx context.Context, event *model.Even
 			return nil
 		}
 
-		err = tx.Create(event.Name.TombstoneRef(svc.db), tombstone)
+		err = tx.Create(event.Name.TombstonePath(), tombstone)
 		if err != nil {
 			return fmt.Errorf("failed to create tombstone: %w", err)
 		}
@@ -350,9 +349,9 @@ func (svc *propagator) processDeleteEvent(ctx context.Context, event *model.Even
 func (svc *propagator) processUpdateEvent(ctx context.Context, event *model.Event) (shouldPropagate bool, err error) {
 	logger := zerolog.Ctx(ctx)
 
-	err = svc.db.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+	err = svc.db.RunTransaction(ctx, func(ctx context.Context, tx Transaction) error {
 		// check if a tombstone exists
-		snap, err := tx.Get(event.Name.TombstoneRef(svc.db))
+		snap, err := tx.Get(event.Name.TombstonePath())
 		if err != nil && status.Code(err) != codes.NotFound {
 			return err
 		}
@@ -365,7 +364,7 @@ func (svc *propagator) processUpdateEvent(ctx context.Context, event *model.Even
 
 			if tombstone.Timestamp.AsTime().After(event.Timestamp) {
 				logger.Debug().Msg("newer tombstone exists, skipping propagation and deleting the document")
-				err := tx.Delete(event.Name.Ref(svc.db), firestore.LastUpdateTime(event.Timestamp))
+				err := tx.Delete(event.Name.Path, event.Timestamp)
 				if status.Code(err) == codes.FailedPrecondition {
 					logger.Debug().Msg("stale event, skipping propagation")
 					return nil
@@ -383,12 +382,12 @@ func (svc *propagator) processUpdateEvent(ctx context.Context, event *model.Even
 			Trace:     trace.SpanContextFromContext(ctx).TraceID().String(),
 		}
 
-		err = tx.Update(event.Name.Ref(svc.db), []firestore.Update{
+		err = tx.Update(event.Name.Path, []Update{
 			{
 				Path:  "_firesync",
 				Value: metadata,
 			},
-		}, firestore.LastUpdateTime(event.Timestamp))
+		}, event.Timestamp)
 		if status.Code(err) == codes.FailedPrecondition {
 			logger.Debug().Msg("stale event, skipping propagation")
 			return nil

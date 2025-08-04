@@ -128,7 +128,7 @@ func run(ctx context.Context) error {
 		}
 	}()
 
-	propagator := service.NewPropagator(pubsubClient.Topic(cfg.Topic), firestoreClient, cfg.TombstoneTTL, meter)
+	propagator := service.NewPropagator(service.NewPubSubTopicAdapter(pubsubClient.Topic(cfg.Topic)), service.NewFirestoreClientAdapter(firestoreClient), cfg.TombstoneTTL, meter)
 	replicator := service.NewReplicator(meter, firestoreClient)
 
 	r := router.New(router.Config{
